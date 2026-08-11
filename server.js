@@ -10,12 +10,12 @@ const RENDER_KEY = process.env.RD_KEY;
 const GITHUB_USER = process.env.GH_USER;
 
 const ghHeader = { Authorization: `token ${GITHUB_TOKEN}` };
-const rdHeader = { Authorization: `Bearer ${RENDER_KEY}`, 'Accept': 'application/json' };
+const rdHeader = { Authorization: `Bearer ${RENDER_KEY}` };
 
 // 1. DEPLOY BOT
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
-    const repoName = `bot-${Date.now()}`;
+    const repoName = `pyro-bot-${Date.now()}`;
     try {
         await axios.post('https://api.github.com/user/repos', { name: repoName, private: true }, { headers: ghHeader });
         await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/bot.py`, { message: "init", content: Buffer.from(botCode).toString('base64') }, { headers: ghHeader });
@@ -32,18 +32,23 @@ app.post('/deploy', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// 2. CONTROL (RESUME/STOP) - FIXED TO PREVENT HANGING
+// 2. NEW ROBUST CONTROL (RESUME = FORCE RE-DEPLOY)
 app.post('/control', async (req, res) => {
     const { serviceId, action } = req.body;
     try {
-        // We trigger the request but don't wait for Render's long spin-up time
-        axios.post(`https://api.render.com/v1/services/${serviceId}/${action}`, {}, { headers: rdHeader })
-            .catch(err => console.log("Background Task Info:", err.message));
-        
-        // Immediately tell frontend it's processing
+        if (action === 'resume') {
+            // First, make sure it is not suspended
+            await axios.post(`https://api.render.com/v1/services/${serviceId}/resume`, {}, { headers: rdHeader }).catch(e => {});
+            // Then, trigger a fresh deployment (This is the "Full Start" fix)
+            await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, { clearCache: "clear" }, { headers: rdHeader });
+        } else {
+            // Standard stop
+            await axios.post(`https://api.render.com/v1/services/${serviceId}/suspend`, {}, { headers: rdHeader });
+        }
         res.json({ success: true });
     } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
+        const msg = e.response ? e.response.data.message : e.message;
+        res.status(500).json({ success: false, error: msg });
     }
 });
 
