@@ -10,9 +10,9 @@ const RENDER_KEY = process.env.RD_KEY;
 const GITHUB_USER = process.env.GH_USER;
 
 const ghHeader = { Authorization: `token ${GITHUB_TOKEN}` };
-const rdHeader = { Authorization: `Bearer ${RENDER_KEY}` };
+const rdHeader = { Authorization: `Bearer ${RENDER_KEY}`, 'Accept': 'application/json' };
 
-// 1. DEPLOY (Adds RepoName to response)
+// 1. DEPLOY BOT
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
     const repoName = `bot-${Date.now()}`;
@@ -32,21 +32,22 @@ app.post('/deploy', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// 2. CONTROL (Fixed Resume Logic)
+// 2. CONTROL (RESUME/STOP) - FIXED TO PREVENT HANGING
 app.post('/control', async (req, res) => {
     const { serviceId, action } = req.body;
     try {
-        if (action === 'resume') {
-            // Force a fresh deploy instead of just resuming
-            await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, {}, { headers: rdHeader });
-        } else {
-            await axios.post(`https://api.render.com/v1/services/${serviceId}/${action}`, {}, { headers: rdHeader });
-        }
+        // We trigger the request but don't wait for Render's long spin-up time
+        axios.post(`https://api.render.com/v1/services/${serviceId}/${action}`, {}, { headers: rdHeader })
+            .catch(err => console.log("Background Task Info:", err.message));
+        
+        // Immediately tell frontend it's processing
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
-// 3. FILE MANAGER (New)
+// 3. FILE MANAGER
 app.post('/files', async (req, res) => {
     const { repo, path, content, sha, action } = req.body;
     const url = `https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/${path}`;
@@ -65,6 +66,15 @@ app.post('/files', async (req, res) => {
         if (action === 'delete') {
             await axios.delete(url, { data: { message: "delete", sha: sha }, headers: ghHeader });
         }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// 4. DELETE
+app.post('/delete', async (req, res) => {
+    const { serviceId } = req.body;
+    try {
+        await axios.delete(`https://api.render.com/v1/services/${serviceId}`, { headers: rdHeader });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
