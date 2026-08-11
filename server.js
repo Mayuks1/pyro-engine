@@ -10,6 +10,7 @@ const GITHUB_TOKEN = process.env.GH_TOKEN;
 const RENDER_KEY = process.env.RD_KEY;
 const GITHUB_USER = process.env.GH_USER;
 
+// 1. DEPLOY ROUTE
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
     const repoName = `pyro-bot-${Date.now()}`;
@@ -17,41 +18,48 @@ app.post('/deploy', async (req, res) => {
         await axios.post('https://api.github.com/user/repos', { name: repoName, private: true }, { headers: { Authorization: `token ${GITHUB_TOKEN}` }});
         await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/bot.py`, { message: "bot", content: Buffer.from(botCode).toString('base64') }, { headers: { Authorization: `token ${GITHUB_TOKEN}` }});
         await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/requirements.txt`, { message: "req", content: Buffer.from(requirements || "pyTelegramBotAPI\nflask").toString('base64') }, { headers: { Authorization: `token ${GITHUB_TOKEN}` }});
+        
         const owners = await axios.get("https://api.render.com/v1/owners", { headers: { Authorization: `Bearer ${RENDER_KEY}` }});
         const renderRes = await axios.post("https://api.render.com/v1/services", {
             type: "web_service", name: botName, ownerId: owners.data[0].owner.id,
             repo: `https://github.com/${GITHUB_USER}/${repoName}`, branch: "main",
             serviceDetails: { env: "python", plan: "free", envSpecificDetails: { buildCommand: "pip install -r requirements.txt", startCommand: "python bot.py" }}
         }, { headers: { Authorization: `Bearer ${RENDER_KEY}` }});
+        
         res.json({ success: true, id: renderRes.data.id || renderRes.data.service.id });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) { 
+        res.status(500).json({ success: false, error: e.response ? JSON.stringify(e.response.data) : e.message }); 
+    }
 });
 
-// UPDATED CONTROL ROUTE
+// 2. UPDATED CONTROL ROUTE (BETTER RESUME LOGIC)
 app.post('/control', async (req, res) => {
     const { serviceId, action } = req.body;
     try {
-        if (action === 'resume') {
-            // Force a fresh deploy instead of just resuming to ensure bot starts
-            await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, {}, {
-                headers: { Authorization: `Bearer ${RENDER_KEY}` }
-            });
-        } else {
-            // Standard suspend
-            await axios.post(`https://api.render.com/v1/services/${serviceId}/${action}`, {}, {
-                headers: { Authorization: `Bearer ${RENDER_KEY}` }
-            });
-        }
+        // We use the standard /resume and /suspend endpoints
+        // Render Free Tier automatically restarts the process on resume
+        const response = await axios.post(`https://api.render.com/v1/services/${serviceId}/${action}`, {}, {
+            headers: { Authorization: `Bearer ${RENDER_KEY}` }
+        });
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) {
+        // This returns the REAL error from Render so you can see it in your logs
+        const errorDetail = e.response ? e.response.data.message : e.message;
+        res.status(500).json({ success: false, error: errorDetail });
+    }
 });
 
+// 3. DELETE ROUTE
 app.post('/delete', async (req, res) => {
     const { serviceId } = req.body;
     try {
-        await axios.delete(`https://api.render.com/v1/services/${serviceId}`, { headers: { Authorization: `Bearer ${RENDER_KEY}` }});
+        await axios.delete(`https://api.render.com/v1/services/${serviceId}`, {
+            headers: { Authorization: `Bearer ${RENDER_KEY}` }
+        });
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.response ? e.response.data.message : e.message });
+    }
 });
 
 app.listen(process.env.PORT || 3000);
