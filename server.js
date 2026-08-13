@@ -2,129 +2,96 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-// 1. ENGINE CONFIGURATION
 const GITHUB_TOKEN = process.env.GH_TOKEN;
 const RENDER_KEY = process.env.RD_KEY;
 const GITHUB_USER = process.env.GH_USER;
 
-const ghHeader = { 
-    Authorization: `token ${GITHUB_TOKEN}`, 
-    Accept: 'application/vnd.github.v3+json' 
-};
-const rdHeader = { 
-    Authorization: `Bearer ${RENDER_KEY}`, 
-    'Content-Type': 'application/json' 
-};
+const ghHeader = { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' };
+const rdHeader = { Authorization: `Bearer ${RENDER_KEY}`, 'Content-Type': 'application/json' };
 
-// --- AUTO-IGNITE TECHNOLOGY ---
+// --- AUTO-IGNITE TECHNOLOGY (Mandatory for Render Health Checks) ---
 const PYRO_WRAPPER_PY = `
 # --- PYROCORE AUTO-IGNITE START ---
+import os, threading
 from flask import Flask
-from threading import Thread
-import os
 pyro_app = Flask(__name__)
 @pyro_app.route('/')
-def pyro_h(): return "PyroCore Engine: Online"
-def pyro_r(): pyro_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
-Thread(target=pyro_r).start()
+def pyro_h(): return "Engine: Online"
+def pyro_r():
+    port = int(os.environ.get('PORT', 10000))
+    pyro_app.run(host='0.0.0.0', port=port)
+threading.Thread(target=pyro_r, daemon=True).start()
 # --- PYROCORE AUTO-IGNITE END ---
 
 `;
 
-const injectWrapper = (content, filename) => {
+const injectWrapper = (content) => {
     if (content.includes("PYROCORE AUTO-IGNITE")) return content;
-    if (filename.endsWith('.py')) return PYRO_WRAPPER_PY + content;
-    return content;
+    return PYRO_WRAPPER_PY + content;
 };
 
-// --- SYSTEM HEALTH CHECK ---
-app.get('/', (req, res) => { res.send("PyroCore Engine v9.5: Sovereign System Online ✅"); });
+app.get('/', (req, res) => { res.send("PyroCore Engine v10.0: Sovereign System Online ✅"); });
 
-// 2. DEPLOY BOT
+// 1. DEPLOY BOT
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
     const repoName = `bot-${Date.now()}`;
-    const mainFile = 'bot.py';
-    const finalCode = injectWrapper(botCode, mainFile);
+    const finalCode = injectWrapper(botCode);
 
     try {
-        // Create GitHub Repo
         await axios.post('https://api.github.com/user/repos', { name: repoName, private: true }, { headers: ghHeader });
-        
-        // Upload Files
-        await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/${mainFile}`, { 
+        await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/bot.py`, { 
             message: "ignition", content: Buffer.from(finalCode).toString('base64') 
         }, { headers: ghHeader });
-        
         await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/requirements.txt`, { 
-            message: "reqs", content: Buffer.from(requirements || "pyTelegramBotAPI\nflask\ngunicorn").toString('base64') 
+            message: "reqs", content: Buffer.from(requirements || "pyTelegramBotAPI\ndiscord.py\nflask\ngunicorn").toString('base64') 
         }, { headers: ghHeader });
 
-        // Create Render Service
         const owners = await axios.get("https://api.render.com/v1/owners", { headers: rdHeader });
         const renderRes = await axios.post("https://api.render.com/v1/services", {
             type: "web_service", name: botName, ownerId: owners.data[0].owner.id,
             repo: `https://github.com/${GITHUB_USER}/${repoName}`, branch: "main",
             serviceDetails: {
                 env: "python", plan: "free",
-                envSpecificDetails: { buildCommand: "pip install -r requirements.txt", startCommand: `python ${mainFile}` }
+                envSpecificDetails: { 
+                    buildCommand: "pip install -r requirements.txt", 
+                    // CRITICAL FIX: Use gunicorn as the entry point to satisfy port check instantly
+                    startCommand: "gunicorn bot:pyro_app --bind 0.0.0.0:$PORT --daemon && python bot.py" 
+                }
             }
         }, { headers: rdHeader });
 
-        res.json({ 
-            success: true, 
-            id: renderRes.data.id || renderRes.data.service.id, 
-            repo: repoName,
-            url: renderRes.data.service ? renderRes.data.service.url : "" 
-        });
+        res.json({ success: true, id: renderRes.data.id || renderRes.data.service.id, repo: repoName, url: renderRes.data.service.url });
     } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// 3. CORRECTED ENVIRONMENT SYSTEM (THE FIX)
+// 2. FIXED ENVIRONMENT SYSTEM
 app.post('/env', async (req, res) => {
     const { serviceId, envVars } = req.body; 
-    // envVars arrives as: [{key: 'TOKEN', value: '123'}]
-    
     try {
-        // Step 1: Update variables on Render
-        // API Docs: PUT /services/{serviceId}/env-vars
         await axios.put(`https://api.render.com/v1/services/${serviceId}/env-vars`, 
-            envVars.map(ev => ({ key: ev.key.toUpperCase(), value: ev.value })), 
-            { headers: rdHeader }
-        );
-
-        // Step 2: Trigger fresh deploy to apply variables
-        await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, 
-            { clearCache: "clear" }, 
-            { headers: rdHeader }
-        );
-
-        res.json({ success: true, message: "Variables synced & Rebuilding..." });
-    } catch (e) {
-        console.error("Env Sync Error:", e.response?.data || e.message);
-        res.status(500).json({ success: false, error: "Cloud rejected variables." });
-    }
+            envVars.map(ev => ({ key: ev.key.toUpperCase(), value: ev.value })), { headers: rdHeader });
+        // Trigger REBUILD to ensure variables are loaded
+        await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, { clearCache: "clear" }, { headers: rdHeader });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: "Cloud Sync Failed" }); }
 });
 
-// 4. POWER CONTROL
+// 3. POWER CONTROL
 app.post('/control', async (req, res) => {
     const { serviceId, action } = req.body;
     const ep = action === 'resume' ? 'resume' : 'suspend';
     try {
         await axios.post(`https://api.render.com/v1/services/${serviceId}/${ep}`, {}, { headers: rdHeader });
-        if(action === 'resume') {
-            // Force a deploy on start to ensure health
-            await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, {}, { headers: rdHeader });
-        }
+        if(action === 'resume') await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, { clearCache: "do_not_clear" }, { headers: rdHeader });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// 5. REAL STATUS POLLING
+// 4. REAL STATUS
 app.get('/status/:id', async (req, res) => {
     try {
         const r = await axios.get(`https://api.render.com/v1/services/${req.params.id}`, { headers: rdHeader });
@@ -132,36 +99,31 @@ app.get('/status/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// 6. FILE MANAGER (GITHUB BRIDGE)
+// 5. FILE MANAGER
 app.post('/files', async (req, res) => {
     const { repo, path, content, sha, action } = req.body;
     const url = `https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/${path}`;
     try {
         if (action === 'list') return res.json((await axios.get(`https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/`, { headers: ghHeader })).data);
-        
         if (action === 'get') {
             const r = await axios.get(url, { headers: ghHeader });
             let raw = Buffer.from(r.data.content, 'base64').toString();
-            // Strip the Auto-Ignite code before showing to user
-            const clean = raw.includes("# --- PYROCORE AUTO-IGNITE END ---") ? 
-                          raw.split("# --- PYROCORE AUTO-IGNITE END ---")[1].trim() : raw;
+            const clean = raw.includes("# --- PYROCORE AUTO-IGNITE END ---") ? raw.split("# --- PYROCORE AUTO-IGNITE END ---")[1].trim() : raw;
             return res.json({ content: clean, sha: r.data.sha });
         }
-
         if (action === 'save') {
-            const finalCode = injectWrapper(content, path);
-            await axios.put(url, { message: "update", content: Buffer.from(finalCode).toString('base64'), sha: sha }, { headers: ghHeader });
+            const finalCode = injectWrapper(content);
+            await axios.put(url, { message: "edit", content: Buffer.from(finalCode).toString('base64'), sha: sha }, { headers: ghHeader });
             res.json({ success: true });
         }
-        
         if (action === 'delete') {
-            await axios.delete(url, { data: { message: "delete", sha: sha }, headers: ghHeader });
+            await axios.delete(url, { data: { message: "del", sha: sha }, headers: ghHeader });
             res.json({ success: true });
         }
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// 7. CLEANUP (PURGE)
+// 6. DELETE PURGE
 app.post('/delete', async (req, res) => {
     const { serviceId, repoName } = req.body;
     try {
@@ -171,17 +133,5 @@ app.post('/delete', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// HEARTBEAT (Keeps Free Tier services awake)
-setInterval(async () => {
-    try {
-        const s = await axios.get("https://api.render.com/v1/services?limit=20", { headers: rdHeader });
-        s.data.forEach(b => { 
-            if(b.service.suspended === 'not_suspended' && b.service.url) {
-                axios.get(b.service.url).catch(()=>{}); 
-            }
-        });
-    } catch(e){}
-}, 14 * 60 * 1000); // Every 14 mins
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Engine Master Online | Port ${PORT}`));
+app.listen(PORT, () => console.log(`Engine Sovereign v10.0 Online`));
