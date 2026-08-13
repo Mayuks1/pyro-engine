@@ -6,89 +6,132 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 1. CONFIGURATION
+// 1. ENGINE CONFIGURATION
+// Ensure these are set in Render -> Dashboard -> Environment
 const GITHUB_TOKEN = process.env.GH_TOKEN;
 const RENDER_KEY = process.env.RD_KEY;
 const GITHUB_USER = process.env.GH_USER;
 
-// Logic to prevent crash if env vars are missing
-const ghHeader = GITHUB_TOKEN ? { 
+const ghHeader = { 
     Authorization: `token ${GITHUB_TOKEN}`,
     Accept: 'application/vnd.github.v3+json'
-} : {};
+};
 
-const rdHeader = RENDER_KEY ? { 
+const rdHeader = { 
     Authorization: `Bearer ${RENDER_KEY}`,
     'Content-Type': 'application/json'
-} : {};
+};
 
-// --- MANDATORY HEALTH CHECK (Fixes Render Start Error) ---
+// --- SYSTEM HEALTH CHECK ---
 app.get('/', (req, res) => {
-    res.status(200).send("PyroCore Engine v8.0: Online ✅");
+    res.send("PyroCore Engine v8.5: Sovereign System Online ✅");
 });
 
-// 2. DEPLOY BOT
+// 2. BOT DEPLOYMENT (INITIAL IGNITION)
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
     const repoName = `bot-${Date.now()}`;
+
     try {
-        if (!GITHUB_TOKEN || !RENDER_KEY) throw new Error("Server Environment Variables not set.");
+        // Step A: Create Private GitHub Repo
+        await axios.post('https://api.github.com/user/repos', 
+            { name: repoName, private: true }, { headers: ghHeader });
 
-        await axios.post('https://api.github.com/user/repos', { name: repoName, private: true }, { headers: ghHeader });
+        // Step B: Upload Main Code (bot.py)
         await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/bot.py`, {
-            message: "init", content: Buffer.from(botCode).toString('base64')
-        }, { headers: ghHeader });
-        await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/requirements.txt`, {
-            message: "init", content: Buffer.from(requirements || "pyTelegramBotAPI\nflask\ngunicorn").toString('base64')
+            message: "ignition",
+            content: Buffer.from(botCode).toString('base64')
         }, { headers: ghHeader });
 
+        // Step C: Upload Requirements
+        await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/requirements.txt`, {
+            message: "reqs",
+            content: Buffer.from(requirements || "pyTelegramBotAPI\ndiscord.py\nflask\ngunicorn").toString('base64')
+        }, { headers: ghHeader });
+
+        // Step D: Get Render Owner ID
         const owners = await axios.get("https://api.render.com/v1/owners", { headers: rdHeader });
+        const ownerId = owners.data[0].owner.id;
+
+        // Step E: Launch Web Service on Render
         const renderRes = await axios.post("https://api.render.com/v1/services", {
-            type: "web_service", name: botName, ownerId: owners.data[0].owner.id,
-            repo: `https://github.com/${GITHUB_USER}/${repoName}`, branch: "main",
-            serviceDetails: { env: "python", plan: "free", envSpecificDetails: { buildCommand: "pip install -r requirements.txt", startCommand: "python bot.py" }}
+            type: "web_service",
+            name: botName,
+            ownerId: ownerId,
+            repo: `https://github.com/${GITHUB_USER}/${repoName}`,
+            branch: "main",
+            serviceDetails: {
+                env: "python",
+                plan: "free",
+                envSpecificDetails: {
+                    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt",
+                    // THE PRO FIX: Runs Gunicorn health-check in background and bot in foreground
+                    startCommand: "gunicorn bot:app --bind 0.0.0.0:$PORT --worker-class gthread --threads 4 & python bot.py"
+                }
+            }
         }, { headers: rdHeader });
 
-        res.json({ success: true, id: renderRes.data.id || renderRes.data.service.id, repo: repoName });
+        res.json({ 
+            success: true, 
+            id: renderRes.data.id || renderRes.data.service.id, 
+            repo: repoName 
+        });
+
+    } catch (e) {
+        const errorMsg = e.response ? JSON.stringify(e.response.data) : e.message;
+        res.status(500).json({ success: false, error: errorMsg });
+    }
+});
+
+// 3. REAL-TIME STATUS CHECKER
+app.get('/status/:id', async (req, res) => {
+    try {
+        const r = await axios.get(`https://api.render.com/v1/services/${req.params.id}`, { headers: rdHeader });
+        const state = r.data.suspended === 'suspended' ? 'STOPPED' : 'RUNNING';
+        res.json({ success: true, status: state });
+    } catch (e) {
+        res.status(500).json({ success: false });
+    }
+});
+
+// 4. POWER CONTROLS (STOP / RESUME)
+app.post('/control', async (req, res) => {
+    const { serviceId, action } = req.body;
+    try {
+        if (action === 'resume') {
+            await axios.post(`https://api.render.com/v1/services/${serviceId}/resume`, {}, { headers: rdHeader }).catch(() => {});
+            // Force Deploy with Clear Cache to ensure the Python loop starts fresh
+            await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, { clearCache: "clear" }, { headers: rdHeader });
+        } else {
+            await axios.post(`https://api.render.com/v1/services/${serviceId}/suspend`, {}, { headers: rdHeader });
+        }
+        res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// 3. ENV VAR SYNC
+// 5. ENVIRONMENT VARIABLE SYNC
 app.post('/env', async (req, res) => {
-    const { serviceId, envVars } = req.body;
+    const { serviceId, envVars } = req.body; 
     try {
         await axios.put(`https://api.render.com/v1/services/${serviceId}/env-vars`, 
-            envVars.map(ev => ({ key: ev.key.toUpperCase(), value: ev.value })), { headers: rdHeader });
+            envVars.map(ev => ({ key: ev.key.toUpperCase(), value: ev.value })), 
+            { headers: rdHeader }
+        );
+        // Redeploy to apply new env vars
         await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, { clearCache: "clear" }, { headers: rdHeader });
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
-// 4. CONTROL (STOP/RESUME)
-app.post('/control', async (req, res) => {
-    const { serviceId, action } = req.body;
-    try {
-        const ep = action === 'resume' ? 'resume' : 'suspend';
-        await axios.post(`https://api.render.com/v1/services/${serviceId}/${ep}`, {}, { headers: rdHeader });
-        if(action === 'resume') await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, {}, { headers: rdHeader });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-// 5. STATUS
-app.get('/status/:id', async (req, res) => {
-    try {
-        const r = await axios.get(`https://api.render.com/v1/services/${req.params.id}`, { headers: rdHeader });
-        res.json({ success: true, status: r.data.suspended === 'suspended' ? 'STOPPED' : 'RUNNING' });
-    } catch (e) { res.status(500).json({ success: false }); }
-});
-
-// 6. FILE MANAGER
+// 6. FILE MANAGER (GITHUB BRIDGE)
 app.post('/files', async (req, res) => {
     const { repo, path, content, sha, action } = req.body;
     const url = `https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/${path}`;
+
     try {
         if (action === 'list') {
             const r = await axios.get(`https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/`, { headers: ghHeader });
@@ -99,27 +142,38 @@ app.post('/files', async (req, res) => {
             return res.json({ content: Buffer.from(r.data.content, 'base64').toString(), sha: r.data.sha });
         }
         if (action === 'save') {
-            await axios.put(url, { message: "update", content: Buffer.from(content).toString('base64'), sha: sha }, { headers: ghHeader });
+            await axios.put(url, { 
+                message: "update via pyro-console", 
+                content: Buffer.from(content).toString('base64'), 
+                sha: sha 
+            }, { headers: ghHeader });
         }
         if (action === 'delete') {
-            await axios.delete(url, { data: { message: "delete", sha: sha }, headers: ghHeader });
+            await axios.delete(url, { 
+                data: { message: "delete via pyro-console", sha: sha }, 
+                headers: ghHeader 
+            });
         }
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
-// 7. DELETE
+// 7. PURGE SYSTEM (CLEANUP)
 app.post('/delete', async (req, res) => {
     const { serviceId, repoName } = req.body;
     try {
         if (serviceId) await axios.delete(`https://api.render.com/v1/services/${serviceId}`, { headers: rdHeader });
         if (repoName) await axios.delete(`https://api.github.com/repos/${GITHUB_USER}/${repoName}`, { headers: ghHeader });
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false }); }
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
-// 8. START SERVER ON RENDER PORT
+// 8. START ENGINE
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server successfully started on port ${PORT}`);
+    console.log(`[PYRO_CORE] Engine Online | Port: ${PORT}`);
 });
