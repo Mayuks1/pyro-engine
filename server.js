@@ -2,7 +2,6 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
@@ -12,105 +11,102 @@ const HF_TOKEN = process.env.HF_TOKEN;
 const HF_USER = process.env.HF_USER;
 
 const ghHeader = { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' };
-const hfHeader = { Authorization: `Bearer ${HF_TOKEN}` };
+const hfHeader = { Authorization: `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json' };
 
-app.get('/', (req, res) => { res.send("PyroCore HF-Engine v13.0: Sovereign Active ✅"); });
+// --- NEW GRADIO WRAPPER (To bypass the PRO requirement) ---
+const PYRO_WRAPPER_PY = `
+# --- PYROCORE AUTO-IGNITE START ---
+import os, threading, gradio as gr
+from flask import Flask
+def pyro_ui():
+    with gr.Blocks(title="PyroHost Node") as demo:
+        gr.Markdown("# ❄️ PyroHost Sub-Zero Node\\n**Status:** Engine Operational ✅")
+    demo.launch(server_name="0.0.0.0", server_port=7860, prevent_thread_lock=True)
 
-// 1. DEPLOY BOT TO HUGGING FACE
+threading.Thread(target=pyro_ui, daemon=True).start()
+# --- PYROCORE AUTO-IGNITE END ---
+
+`;
+
+const injectWrapper = (content) => {
+    if (content.includes("PYROCORE AUTO-IGNITE")) return content;
+    return PYRO_WRAPPER_PY + content;
+};
+
+app.get('/', (req, res) => { res.send("PyroCore HF-Engine v14.0: Free Tier Active ✅"); });
+
+// 1. DEPLOY BOT TO HUGGING FACE (Gradio SDK Fix)
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
     const repoName = `bot-${Date.now()}`;
     const spaceName = botName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const finalCode = injectWrapper(botCode);
 
     try {
         // Step A: Create GitHub Repo (Backup)
         await axios.post('https://api.github.com/user/repos', { name: repoName, private: true }, { headers: ghHeader });
         await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/bot.py`, { message: "init", content: Buffer.from(botCode).toString('base64') }, { headers: ghHeader });
-        await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repoName}/contents/requirements.txt`, { message: "init", content: Buffer.from(requirements || "pyTelegramBotAPI\ndiscord.py").toString('base64') }, { headers: ghHeader });
 
-        // Step B: Create Hugging Face Space (Docker-based for total freedom)
-        // This creates a Python SDK space which is very efficient
-        const hfRes = await axios.post(`https://huggingface.co/api/repos/create`, {
+        // Step B: Create Hugging Face Space (Using 'gradio' SDK for FREE access)
+        await axios.post(`https://huggingface.co/api/repos/create`, {
             name: spaceName,
             type: "space",
-            sdk: "docker", // Using Docker gives us true 24/7 background power
-            private: true
+            sdk: "gradio", // CHANGED FROM DOCKER TO GRADIO
+            private: false  // Public spaces are more stable on free tier
         }, { headers: hfHeader });
 
-        // Step C: Push Dockerfile to HF to run the bot
-        const dockerfile = `FROM python:3.10\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD ["python", "bot.py"]`;
-        
-        await axios.put(`https://huggingface.co/api/spaces/${HF_USER}/${spaceName}/contents/Dockerfile`, {
-            message: "setup docker",
-            content: Buffer.from(dockerfile).toString('base64')
+        // Step C: Upload app.py (HF looks for app.py in Gradio SDK)
+        await axios.put(`https://huggingface.co/api/spaces/${HF_USER}/${spaceName}/contents/app.py`, {
+            message: "setup app",
+            content: Buffer.from(finalCode).toString('base64')
         }, { headers: hfHeader });
 
-        await axios.put(`https://huggingface.co/api/spaces/${HF_USER}/${spaceName}/contents/bot.py`, {
-            message: "sync bot",
-            content: Buffer.from(botCode).toString('base64')
-        }, { headers: hfHeader });
-
+        // Step D: Upload requirements
+        // Must include 'gradio' for the fix to work
+        const finalReqs = (requirements || "pyTelegramBotAPI\ndiscord.py") + "\ngradio\nflask";
         await axios.put(`https://huggingface.co/api/spaces/${HF_USER}/${spaceName}/contents/requirements.txt`, {
             message: "sync reqs",
-            content: Buffer.from(requirements || "pyTelegramBotAPI\ndiscord.py").toString('base64')
+            content: Buffer.from(finalReqs).toString('base64')
         }, { headers: hfHeader });
 
         res.json({ success: true, id: spaceName, repo: repoName });
     } catch (e) {
-        res.status(500).json({ success: false, error: e.response ? JSON.stringify(e.response.data) : e.message });
+        console.error(e.response?.data);
+        res.status(500).json({ success: false, error: e.response?.data?.error || e.message });
     }
 });
 
-// 2. STATUS CHECKER (HF)
+// 2. POWER CONTROL & STATUS
 app.get('/status/:id', async (req, res) => {
     try {
         const r = await axios.get(`https://huggingface.co/api/spaces/${HF_USER}/${req.params.id}`, { headers: hfHeader });
-        // HF status: 'running', 'building', 'stopped', etc.
         const state = r.data.runtime.stage === 'RUNNING' ? 'RUNNING' : 'STOPPED';
         res.json({ success: true, status: state });
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// 3. POWER CONTROL
 app.post('/control', async (req, res) => {
     const { serviceId, action } = req.body;
     try {
-        // action: 'suspend' (Pause) or 'resume' (Restart)
         const endpoint = action === 'resume' ? 'restart' : 'pause';
         await axios.post(`https://huggingface.co/api/spaces/${HF_USER}/${serviceId}/${endpoint}`, {}, { headers: hfHeader });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// 4. ENV SYNC
-app.post('/env', async (req, res) => {
-    const { serviceId, envVars } = req.body;
-    try {
-        // HF uses a different method for secrets
-        for (let ev of envVars) {
-            await axios.post(`https://huggingface.co/api/spaces/${HF_USER}/${serviceId}/secrets`, {
-                key: ev.key.toUpperCase(),
-                value: ev.value
-            }, { headers: hfHeader });
-        }
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ success: false }); }
-});
-
-// 5. FILE MANAGER
+// 3. FILE MANAGER (Updated for app.py)
 app.post('/files', async (req, res) => {
     const { repo, path, content, sha, action } = req.body;
-    // We update BOTH GitHub and HF to keep them in sync
-    const hfUrl = `https://huggingface.co/api/spaces/${HF_USER}/${repo}/contents/${path}`;
+    const hfPath = (path === 'bot.py') ? 'app.py' : path;
+    const hfUrl = `https://huggingface.co/api/spaces/${HF_USER}/${repo}/contents/${hfPath}`;
     try {
         if (action === 'list') {
             const r = await axios.get(`https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/`, { headers: ghHeader });
             return res.json(r.data);
         }
         if (action === 'save') {
-            // Save to HF
-            await axios.put(hfUrl, { message: "edit", content: Buffer.from(content).toString('base64') }, { headers: hfHeader });
-            // Save to GitHub
+            const finalCode = (hfPath === 'app.py') ? injectWrapper(content) : content;
+            await axios.put(hfUrl, { message: "edit", content: Buffer.from(finalCode).toString('base64') }, { headers: hfHeader });
             await axios.put(`https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/${path}`, { message: "edit", content: Buffer.from(content).toString('base64'), sha: sha }, { headers: ghHeader });
         }
         if (action === 'delete') {
@@ -121,7 +117,6 @@ app.post('/files', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false }); }
 });
 
-// 6. DELETE
 app.post('/delete', async (req, res) => {
     const { serviceId, repoName } = req.body;
     try {
