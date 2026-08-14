@@ -1,7 +1,7 @@
 {
   "name": "pyro-engine",
   "version": "1.0.0",
-  "description": "PyroHost Backend Engine",
+  "description": "PyroHost Core Engine",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
