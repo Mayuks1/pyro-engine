@@ -3,20 +3,25 @@ const axios = require('axios');
 const cors = require('cors');
 const app = express();
 
-app.use(cors());
+// 1. DYNAMIC CORS CONFIGURATION
+app.use(cors({
+    origin: '*', // Allows all websites to connect
+    methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
-// 1. CONFIGURATION
+// 2. CONFIGURATION
 const GITHUB_TOKEN = process.env.GH_TOKEN;
 const RENDER_KEY = process.env.RD_KEY;
 const GITHUB_USER = process.env.GH_USER;
-// Use your RTDB URL from your firebase config
 const DB_URL = "https://songsaas-default-rtdb.asia-southeast1.firebasedatabase.app";
 
 const ghHeader = { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' };
 const rdHeader = { Authorization: `Bearer ${RENDER_KEY}`, 'Content-Type': 'application/json' };
 
-// --- AUTO-IGNITE: Invisible Flask Injection ---
+// --- AUTO-IGNITE WRAPPER ---
 const PYRO_WRAPPER = `
 import os, threading
 from flask import Flask
@@ -29,10 +34,10 @@ threading.Thread(target=r, daemon=True).start()
 
 // Health Check for Render & Cron-Job
 app.get('/', (req, res) => {
-    res.send("PyroCore Engine v15.0: Sovereign Active ✅");
+    res.status(200).send("PyroCore Engine: Operational ✅");
 });
 
-// 2. DEPLOY BOT
+// 3. DEPLOY BOT
 app.post('/deploy', async (req, res) => {
     const { botName, botCode, requirements } = req.body;
     const repoName = `pyro-bot-${Date.now()}`;
@@ -53,63 +58,52 @@ app.post('/deploy', async (req, res) => {
         const botUrl = renderRes.data.service ? renderRes.data.service.url : `https://${botName}.onrender.com`;
         res.json({ success: true, id: renderRes.data.id || renderRes.data.service.id, repo: repoName, url: botUrl });
     } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
+        res.status(500).json({ success: false, error: e.response?.data?.message || e.message });
     }
 });
 
-// 3. HEARTBEAT SYSTEM (Keeps Bots Online)
-const runHeartbeat = async () => {
-    console.log("💓 Running Heartbeat...");
-    try {
-        // Fetch all user data from Firebase RTDB (.json adds no complexity)
-        const response = await axios.get(`${DB_URL}/users.json`);
-        const users = response.data;
-        if (!users) return;
-
-        Object.values(users).forEach(user => {
-            if (user.bots) {
-                Object.values(user.bots).forEach(bot => {
-                    if (bot.status === 'running' && bot.botUrl) {
-                        // Ping the bot to keep it awake
-                        axios.get(bot.botUrl).catch(() => {});
-                    }
-                });
-            }
-        });
-    } catch (e) {
-        console.log("Heartbeat error: skipping cycle.");
-    }
-};
-
-// Start the Heartbeat every 5 minutes
-setInterval(runHeartbeat, 5 * 60 * 1000);
-
-// 4. CONTROL, FILES, DELETE (Simplified)
+// 4. POWER CONTROL
 app.post('/control', async (req, res) => {
     const { serviceId, action } = req.body;
     const ep = action === 'resume' ? 'resume' : 'suspend';
-    await axios.post(`https://api.render.com/v1/services/${serviceId}/${ep}`, {}, { headers: rdHeader }).catch(()=>{});
-    if(action === 'resume') axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, {clearCache:"clear"}, { headers: rdHeader }).catch(()=>{});
-    res.json({ success: true });
-});
-
-app.post('/delete', async (req, res) => {
-    const { serviceId, repoName } = req.body;
-    if (serviceId) axios.delete(`https://api.render.com/v1/services/${serviceId}`, { headers: rdHeader }).catch(()=>{});
-    if (repoName) axios.delete(`https://api.github.com/repos/${GITHUB_USER}/${repoName}`, { headers: ghHeader }).catch(()=>{});
-    res.json({ success: true });
-});
-
-app.post('/files', async (req, res) => {
-    const { repo, path, content, sha, action } = req.body;
-    const url = `https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/${path}`;
     try {
-        if (action === 'list') return res.json((await axios.get(`https://api.github.com/repos/${GITHUB_USER}/${repo}/contents/`, { headers: ghHeader })).data);
-        if (action === 'save') await axios.put(url, { message: "edit", content: Buffer.from(path === 'bot.py' ? PYRO_WRAPPER + content : content).toString('base64'), sha: sha }, { headers: ghHeader });
-        if (action === 'delete') await axios.delete(url, { data: { message: "del", sha: sha }, headers: ghHeader });
+        await axios.post(`https://api.render.com/v1/services/${serviceId}/${ep}`, {}, { headers: rdHeader });
+        if(action === 'resume') await axios.post(`https://api.render.com/v1/services/${serviceId}/deploys`, {clearCache:"clear"}, { headers: rdHeader });
         res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// 5. STATUS POLLING
+app.get('/status/:id', async (req, res) => {
+    try {
+        const r = await axios.get(`https://api.render.com/v1/services/${req.params.id}`, { headers: rdHeader });
+        res.json({ success: true, status: r.data.suspended === 'suspended' ? 'STOPPED' : 'RUNNING' });
     } catch (e) { res.status(500).json({ success: false }); }
 });
+
+// 6. PURGE ENGINE
+app.post('/delete', async (req, res) => {
+    const { serviceId, repoName } = req.body;
+    try {
+        if (serviceId) await axios.delete(`https://api.render.com/v1/services/${serviceId}`, { headers: rdHeader });
+        if (repoName) await axios.delete(`https://api.github.com/repos/${GITHUB_USER}/${repoName}`, { headers: ghHeader });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// 7. HEARTBEAT SYSTEM
+setInterval(async () => {
+    try {
+        const response = await axios.get(`${DB_URL}/users.json`);
+        const users = response.data;
+        if (!users) return;
+        Object.values(users).forEach(u => {
+            if (u.bots) Object.values(u.bots).forEach(b => {
+                if (b.status === 'running' && b.botUrl) axios.get(b.botUrl).catch(() => {});
+            });
+        });
+    } catch (e) {}
+}, 10 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Engine Online on Port ${PORT}`));
